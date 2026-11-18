@@ -40,5 +40,108 @@ from ..model_cache import get_preds  # noqa: F401
 
 
 def run(ds, cfg, preds=None):
-    # TODO
-    raise NotImplementedError("check second_opinion chưa làm")
+    if preds is None:
+        preds = get_preds(ds, cfg, "checker")
+
+    settings = cfg["second_opinion"]
+    min_conf = settings["conf"]
+    min_area_px = settings["min_area_px"]
+    fp_conf = settings["fp_conf"]
+    iou_missing = settings["iou_missing"]
+    iou_match = settings["iou_match"]
+    iou_loose = settings["iou_loose"]
+    issues = []
+
+    for image_path in ds.image_files():
+        stem = image_path.stem
+        if stem not in preds or not ds.label_path(stem).is_file():
+            continue
+
+        # Keep each parsed label's physical source line for FALSE_POS reporting.
+        labels = []
+        for line_no, text in ds.read_label_lines(stem) or []:
+            try:
+                class_id, cx, cy, width, height = parse_yolo_line(text)
+            except ValueError:
+                continue
+            if 0 <= class_id < len(ds.classes):
+                labels.append((line_no, class_id, (cx, cy, width, height)))
+
+        valid_preds = []
+        for row in preds.get(stem, []):
+            try:
+                if len(row) != 6:
+                    continue
+                class_id = int(row[0])
+                confidence = float(row[1])
+                box = tuple(float(v) for v in row[2:])
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= class_id < len(ds.classes):
+                continue
+            valid_preds.append((class_id, confidence, box))
+
+        size = ds.image_size(stem)
+        image_width, image_height = size if size is not None else (0, 0)
+        model_preds = [
+            (class_id, confidence, box)
+            for class_id, confidence, box in valid_preds
+            if confidence >= min_conf
+            and box[2] * image_width * box[3] * image_height >= min_area_px
+        ]
+
+        # Compare model detections first, preserving the model's prediction order.
+        for pred_class, confidence, pred_box in model_preds:
+            candidates = [
+                (label_class, box, iou_xywh(pred_box, box))
+                for _, label_class, box in labels
+                if iou_xywh(pred_box, box) >= iou_missing
+            ]
+            if not candidates:
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_MISSING", stem,
+                    "model thấy vật nhưng không có box nhãn khớp",
+                    extra={"conf": confidence},
+                ))
+                continue
+
+            same_class = [iou for label_class, _, iou in candidates if label_class == pred_class]
+            if same_class:
+                best_iou = max(same_class)
+                if best_iou < iou_loose:
+                    issues.append(Issue(
+                        "second_opinion", WARN, "POSSIBLE_LOOSE_BOX", stem,
+                        f"box cùng lớp khớp lỏng (IoU {best_iou:.4f})",
+                        extra={"conf": confidence, "iou": best_iou},
+                    ))
+                continue
+
+            different_class = [iou for label_class, _, iou in candidates if label_class != pred_class]
+            if different_class and max(different_class) >= iou_match:
+                best_iou = max(different_class)
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_WRONG_CLASS", stem,
+                    f"box khớp với nhãn khác lớp (IoU {best_iou:.4f})",
+                    extra={"conf": confidence, "iou": best_iou},
+                ))
+
+        # False positives use the lower confidence threshold and no area filter.
+        fp_preds = [
+            (confidence, box)
+            for _, confidence, box in valid_preds
+            if confidence >= fp_conf
+        ]
+        for line_no, label_class, label_box in labels:
+            best_iou = max(
+                (iou_xywh(label_box, box) for _, box in fp_preds),
+                default=0.0,
+            )
+            if best_iou < iou_missing:
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_FALSE_POS", stem,
+                    f"nhãn lớp {label_class} không khớp dự đoán nào đủ ngưỡng IoU "
+                    f"(IoU tốt nhất {best_iou:.4f})",
+                    line=line_no, extra={"iou": best_iou},
+                ))
+
+    return issues

@@ -35,5 +35,114 @@ from ..common import ERROR, parse_yolo_line  # noqa: F401
 
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    drop_codes = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+    remove_codes = {"LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+    removed_stems = set()
+    fixes = []
+
+    # Decide image-level removals first so any line issues for those images are ignored.
+    for issue in issues:
+        if issue.severity != ERROR:
+            continue
+        if issue.code.startswith("DUP_IMAGE_") or issue.code in remove_codes:
+            if issue.image in removed_stems:
+                continue
+            image_paths = [p for p in ds.image_files() if p.stem == issue.image]
+            label_path = ds.label_path(issue.image)
+            before = ", ".join(p.name for p in image_paths)
+            if label_path.exists():
+                before = f"{before}, {label_path.name}" if before else label_path.name
+            if not image_paths and not label_path.exists():
+                continue
+            for path in image_paths:
+                path.unlink()
+            if label_path.exists():
+                label_path.unlink()
+            removed_stems.add(issue.image)
+            fixes.append({
+                "image": issue.image, "line": None, "action": "remove_image",
+                "before": before, "after": "ảnh và nhãn đã xóa khỏi dataset",
+            })
+
+    # Missing labels are deliberately left absent and routed to a human.
+    for issue in issues:
+        if issue.severity == ERROR and issue.code == "MISSING_LABEL_FILE":
+            fixes.append({
+                "image": issue.image, "line": None, "action": "needs_label",
+                "before": "(không có file)", "after": "chuyển người gán",
+            })
+
+    # Gather line-level actions by original line number. Drop always wins over clip.
+    line_actions = defaultdict(dict)
+    for issue in issues:
+        if issue.severity != ERROR or issue.image in removed_stems or issue.line is None:
+            continue
+        if issue.code in drop_codes:
+            line_actions[issue.image][issue.line] = "drop_line"
+        elif issue.code == "BOX_OUT_OF_IMAGE":
+            line_actions[issue.image].setdefault(issue.line, "clip_box")
+
+    for stem in sorted(line_actions):
+        label_path = ds.label_path(stem)
+        if not label_path.is_file():
+            continue
+        original = label_path.read_text(encoding="utf-8", errors="replace")
+        rows = original.splitlines()
+        changed = False
+        for line_no in sorted(line_actions[stem]):
+            index = line_no - 1
+            if index < 0 or index >= len(rows):
+                continue
+            action = line_actions[stem][line_no]
+            before = rows[index]
+            if action == "drop_line":
+                rows[index] = None
+                after = ""
+                changed = True
+            else:
+                try:
+                    class_id, cx, cy, width, height = parse_yolo_line(before)
+                except ValueError:
+                    continue
+                left = max(0.0, cx - width / 2)
+                top = max(0.0, cy - height / 2)
+                right = min(1.0, cx + width / 2)
+                bottom = min(1.0, cy + height / 2)
+                clipped_width, clipped_height = right - left, bottom - top
+                if clipped_width <= 0 or clipped_height <= 0:
+                    rows[index] = None
+                    action = "drop_line"
+                    after = ""
+                else:
+                    clipped_cx, clipped_cy = (left + right) / 2, (top + bottom) / 2
+                    rows[index] = " ".join(format(value, ".10g") for value in (
+                        class_id, clipped_cx, clipped_cy, clipped_width, clipped_height
+                    ))
+                    after = rows[index]
+                changed = True
+            fixes.append({
+                "image": stem, "line": line_no, "action": action,
+                "before": before, "after": after,
+            })
+
+        if changed:
+            kept_rows = [row for row in rows if row is not None]
+            label_path.write_text("\n".join(kept_rows) + ("\n" if original.endswith(("\n", "\r")) else ""), encoding="utf-8")
+
+    # Restore the configured class ordering while preserving other data.yaml keys.
+    if any(i.severity == ERROR and i.code == "BAD_CLASS_NAME" for i in issues):
+        if ds.yaml_path.exists():
+            data = yaml.safe_load(ds.yaml_path.read_text(encoding="utf-8")) or {}
+        else:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        before = data.get("names")
+        data["names"] = list(cfg["classes"])
+        ds.yaml_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        fixes.append({
+            "image": "data.yaml", "line": None, "action": "rename_classes",
+            "before": repr(before), "after": repr(data["names"]),
+        })
+
+    return fixes

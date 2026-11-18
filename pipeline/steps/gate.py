@@ -20,5 +20,46 @@ from ..common import ERROR, WARN  # noqa: F401
 
 
 def decide(issues, image_stems, cfg, reviewed=frozenset()):
-    # TODO
-    raise NotImplementedError("gate chưa làm")
+    stems = set(image_stems)
+    reviewed = set(reviewed)
+    n_images = len(stems)
+
+    # Lỗi bắt buộc luôn chặn, kể cả lỗi cấp dataset hoặc ảnh đã được review.
+    n_errors = sum(issue.severity == ERROR for issue in issues)
+
+    # Tính số ảnh riêng biệt còn cảnh báo; bỏ qua issue ngoài dataset và ảnh đã review.
+    warn_images = {
+        issue.image
+        for issue in issues
+        if issue.severity == WARN
+        and issue.image in stems
+        and issue.image not in reviewed
+    }
+    n_warn_images = len(warn_images)
+    warn_ratio = round(n_warn_images / n_images, 4) if n_images else 0
+    hold_threshold = cfg["gate"]["warn_ratio_hold"]
+
+    if n_errors:
+        decision = "Rework"
+        reasons = [f"Còn {n_errors} lỗi bắt buộc (ERROR), cần sửa trước khi phát hành."]
+    elif warn_ratio >= hold_threshold:
+        decision = "Hold"
+        reasons = [
+            f"Còn cảnh báo trên {n_warn_images}/{n_images} ảnh "
+            f"(tỷ lệ {warn_ratio:.4f}), đạt/vượt ngưỡng Hold {hold_threshold:.4f}."
+        ]
+    else:
+        decision = "Release"
+        reasons = [
+            f"Không còn lỗi bắt buộc; cảnh báo trên {n_warn_images}/{n_images} ảnh "
+            f"(tỷ lệ {warn_ratio:.4f}) thấp hơn ngưỡng Hold {hold_threshold:.4f}."
+        ]
+
+    return {
+        "decision": decision,
+        "n_errors": n_errors,
+        "n_warn_images": n_warn_images,
+        "n_images": n_images,
+        "warn_ratio": warn_ratio,
+        "reasons": reasons,
+    }

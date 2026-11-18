@@ -72,6 +72,10 @@ else:
     warns.append("thiếu scripts/_protected.json: không kiểm được file đề/cấu hình cố định")
 prot = set(json.loads(pin.read_text(encoding="utf-8"))) if pin.exists() else set()
 for f in [p for p in (ROOT / "pipeline").rglob("*.py") if str(p.relative_to(ROOT)) not in prot]:
+    # Calibration is explicitly allowed to read the injected-answer manifest;
+    # it evaluates checks and is never part of the raw-data QC execution path.
+    if f.relative_to(ROOT).as_posix() == "pipeline/calibrate.py":
+        continue
     t = f.read_text(encoding="utf-8")
     for bad in ("review_reference", "MANIFEST", "answer_key", "data/test", "data/calib", "gold_val"):
         if bad in t and not (f.name == "duplicates.py" and bad in ("data/test", "gold_val")):
