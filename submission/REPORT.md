@@ -52,7 +52,16 @@ Quan sát trực tiếp 10 ảnh `work/viz` (img_0001–0009, img_0030) cho th�
 
 ## 5. Train: raw vs clean (tùy chọn)
 
-**Chưa chạy.** Phần train Colab là tùy chọn và chưa có `submission/results/comparison.md` hay kết quả seed trong repo; vì vậy chưa thể kết luận clean tốt hơn raw. Bước tiếp theo nếu cần đánh giá chất lượng model là train raw/clean trên cùng val/test, siêu tham số và ít nhất hai seed rồi so chênh mAP50 với độ lệch giữa seed.
+Đã train `yolo26n.pt`, 20 epoch, batch 16, imgsz 640, hai seed (0, 1) cho mỗi biến thể. Mỗi biến thể dùng cùng cấu hình và tập đánh giá; raw có 224 ảnh train, clean có 203. Hash config của cả bốn kết quả khớp config hiện tại; hash manifest của hai kết quả clean cũng khớp `clean_v1`.
+
+| Biến thể | Ảnh train | Seed | mAP50 (TB ± SD) | mAP50-95 (TB ± SD) | Precision (TB ± SD) | Recall (TB ± SD) |
+|---|---:|---:|---:|---:|---:|---:|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 203 | 2 | 0.699 ± 0.025 | 0.486 ± 0.013 | 0.796 ± 0.050 | 0.596 ± 0.049 |
+
+Chênh mAP50 (clean − raw) là **−0.027**. Độ chênh này cùng cỡ với SD giữa hai seed của clean (0.025), nên với chỉ hai seed và test 100 ảnh chưa thể kết luận clean làm chất lượng tốt hơn; điểm trung bình clean thấp hơn trong lần chạy này. mAP50-95 cũng thấp hơn 0.026; precision tăng 0.032 và recall giảm 0.053.
+
+Các khả năng cần kiểm chứng: (1) raw có 5 ảnh bị báo `LEAK_TEST` ở intake, nên ảnh trùng test có thể làm điểm raw lạc quan hơn; (2) clean chỉ được mô phỏng duyệt 80/125 ảnh trong hàng đợi và vẫn còn cảnh báo ở 38 ảnh, nên nhãn clean chưa được xác nhận hoàn toàn; (3) clean ít hơn raw 21 ảnh và chỉ có hai seed, vì vậy khác biệt có thể do cỡ/phân bố tập train và nhiễu seed. Có thể kiểm bằng đối chiếu hash/near-duplicate giữa train và test, duyệt phần cảnh báo còn lại, rồi chạy thêm seed và so trên cùng tập test.
 
 ## 6. Quyết định và ghi chú AI
 
